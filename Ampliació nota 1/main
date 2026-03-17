@@ -1,0 +1,187 @@
+#include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+
+// Definición de pines
+#define LED_SEGUNDOS 4      // Canviat al 4 per compatibilitat amb el teu ESP32-S3
+#define LED_MODO 5          // Canviat al 5 
+#define BTN_MODO 16         // Botón para cambiar modo [cite: 223]
+#define BTN_INCREMENTO 17   // Botón para incrementar valor [cite: 223]
+#define BTN_FORMATO 18      // NOU BOTÓ: Para cambiar formato 12h/24h
+
+// Variables para el reloj
+volatile int horas = 0; [cite: 225]
+volatile int minutos = 0; [cite: 226]
+volatile int segundos = 0; [cite: 227]
+volatile int modo = 0; // 0: normal, 1: ajuste horas, 2: ajuste minutos [cite: 228]
+volatile bool formato24h = true; // NOVA VARIABLE: Controla el format de visualització
+
+// Variables FreeRTOS
+QueueHandle_t botonQueue; [cite: 230]
+SemaphoreHandle_t relojMutex; [cite: 231]
+
+// Estructura para los eventos de botones [cite: 232]
+typedef struct {
+  uint8_t boton; [cite: 234]
+  uint32_t tiempo; [cite: 235]
+} EventoBoton;
+
+// Prototipos de tareas [cite: 237]
+void TareaReloj(void *pvParameters);
+void TareaLecturaBotones(void *pvParameters);
+void TareaActualizacionDisplay(void *pvParameters);
+void TareaControlLEDs(void *pvParameters);
+
+// Función para manejar interrupciones de botones [cite: 242]
+void IRAM_ATTR ISR_Boton(void *arg) {
+  uint8_t numeroPulsador = (uint32_t)arg; [cite: 242]
+  EventoBoton evento; [cite: 245]
+  evento.boton = numeroPulsador; [cite: 246]
+  evento.tiempo = xTaskGetTickCountFromISR(); [cite: 247]
+  xQueueSendFromISR(botonQueue, &evento, NULL); [cite: 249]
+}
+
+void setup() {
+  Serial.begin(115200); [cite: 252]
+  Serial.println("Inicializando Reloj Digital con RTOS - Ampliado 12/24h");
+
+  // Configurar pines [cite: 254]
+  pinMode(LED_SEGUNDOS, OUTPUT); [cite: 255]
+  pinMode(LED_MODO, OUTPUT); [cite: 256]
+  pinMode(BTN_MODO, INPUT_PULLUP); [cite: 257]
+  pinMode(BTN_INCREMENTO, INPUT_PULLUP); [cite: 258]
+  pinMode(BTN_FORMATO, INPUT_PULLUP); // Configurar nou botó
+
+  // Crear recursos RTOS [cite: 259]
+  botonQueue = xQueueCreate(10, sizeof(EventoBoton)); [cite: 260]
+  relojMutex = xSemaphoreCreateMutex(); [cite: 261]
+
+  // Configurar interrupciones para los botones [cite: 262]
+  attachInterruptArg(BTN_MODO, ISR_Boton, (void*)BTN_MODO, FALLING); [cite: 263]
+  attachInterruptArg(BTN_INCREMENTO, ISR_Boton, (void*)BTN_INCREMENTO, FALLING); [cite: 263]
+  attachInterruptArg(BTN_FORMATO, ISR_Boton, (void*)BTN_FORMATO, FALLING); // Interrupció nou botó
+
+  // Crear tareas [cite: 264]
+  xTaskCreate(TareaReloj, "Reloj Task", 2048, NULL, 1, NULL); [cite: 265-272]
+  xTaskCreate(TareaLecturaBotones, "Botones Task", 2048, NULL, 2, NULL); [cite: 279-286]
+  xTaskCreate(TareaActualizacionDisplay, "Display Task", 2048, NULL, 1, NULL); [cite: 289-296]
+  xTaskCreate(TareaControlLEDs, "LEDsTask", 1024, NULL, 1, NULL); [cite: 297-304]
+}
+
+void loop() {
+  vTaskDelay(portMAX_DELAY); [cite: 310]
+}
+
+void TareaReloj(void *pvParameters) { [cite: 312]
+  TickType_t xLastWakeTime; [cite: 313]
+  const TickType_t xPeriod = pdMS_TO_TICKS(1000); [cite: 314]
+  xLastWakeTime = xTaskGetTickCount(); [cite: 316]
+
+  for (;;) {
+    vTaskDelayUntil(&xLastWakeTime, xPeriod); [cite: 319]
+    if (xSemaphoreTake(relojMutex, portMAX_DELAY) == pdTRUE) { [cite: 321]
+      if (modo == 0) { [cite: 323]
+        segundos++; [cite: 324]
+        if (segundos >= 60) { [cite: 325]
+          segundos = 0; [cite: 326]
+          minutos++; [cite: 327]
+          if (minutos >= 60) { [cite: 331]
+            minutos = 0; [cite: 332]
+            horas++; [cite: 333]
+            if (horas >= 24) horas = 0; [cite: 334-336]
+          }
+        }
+      }
+      xSemaphoreGive(relojMutex); [cite: 341]
+    }
+  }
+}
+
+void TareaLecturaBotones(void *pvParameters) { [cite: 343]
+  EventoBoton evento; [cite: 344]
+  uint32_t ultimoTiempoBoton = 0; [cite: 345]
+  const uint32_t debounceTime = pdMS_TO_TICKS(300); [cite: 346]
+
+  for (;;) {
+    if (xQueueReceive(botonQueue, &evento, portMAX_DELAY) == pdPASS) { [cite: 349]
+      if ((evento.tiempo - ultimoTiempoBoton) >= debounceTime) { [cite: 351]
+        if (xSemaphoreTake(relojMutex, portMAX_DELAY) == pdTRUE) { [cite: 353]
+          
+          if (evento.boton == BTN_MODO) { [cite: 355]
+            modo = (modo + 1) % 3; [cite: 358]
+            Serial.printf("Cambio de modo: %d\n", modo); [cite: 359]
+          } 
+          else if (evento.boton == BTN_INCREMENTO) { [cite: 360]
+            if (modo == 1) { [cite: 362]
+              horas = (horas + 1) % 24; [cite: 364]
+              Serial.printf("Horas ajustadas a: %d\n", horas); [cite: 365]
+            } else if (modo == 2) { [cite: 366]
+              minutos = (minutos + 1) % 60; [cite: 367]
+              segundos = 0; [cite: 368]
+              Serial.printf("Minutos ajustados a: %d\n", minutos); [cite: 368]
+            }
+          }
+          else if (evento.boton == BTN_FORMATO) { // NOU: Lògica canvi de format
+            formato24h = !formato24h;
+            Serial.println(formato24h ? "Format: 24h" : "Format: 12h");
+          }
+          
+          xSemaphoreGive(relojMutex); [cite: 377]
+        }
+        ultimoTiempoBoton = evento.tiempo; [cite: 379]
+      }
+    }
+  }
+}
+
+void TareaActualizacionDisplay(void *pvParameters) { [cite: 381]
+  int horasAnterior = -1, minutosAnterior = -1, segundosAnterior = -1, modoAnterior = -1; [cite: 382-385]
+  bool formatoAnterior = !formato24h;
+
+  for (;;) {
+    if (xSemaphoreTake(relojMutex, portMAX_DELAY) == pdTRUE) { [cite: 388]
+      bool cambios = (horas != horasAnterior) || (minutos != minutosAnterior) || 
+                     (segundos != segundosAnterior) || (modo != modoAnterior) || 
+                     (formato24h != formatoAnterior); [cite: 390-393]
+
+      if (cambios) { [cite: 394]
+        // NOU: Lògica d'impressió 12h o 24h
+        if (formato24h) {
+          Serial.printf("%02d:%02d:%02d", horas, minutos, segundos); [cite: 397]
+        } else {
+          int horas12 = horas % 12;
+          if (horas12 == 0) horas12 = 12; // Les 00:00 o les 12:00 són les 12 en format AM/PM
+          String ampm = (horas < 12) ? " AM" : " PM";
+          Serial.printf("%02d:%02d:%02d%s", horas12, minutos, segundos, ampm.c_str());
+        }
+
+        if (modo == 0) Serial.println(" [Modo Normal]"); [cite: 399-400]
+        else if (modo == 1) Serial.println(" [Ajuste Horas]"); [cite: 401-402]
+        else if (modo == 2) Serial.println(" [Ajuste Minutos]"); [cite: 403-405]
+
+        horasAnterior = horas; [cite: 407]
+        minutosAnterior = minutos; [cite: 408]
+        segundosAnterior = segundos; [cite: 409]
+        modoAnterior = modo; [cite: 409]
+        formatoAnterior = formato24h;
+      }
+      xSemaphoreGive(relojMutex); [cite: 412]
+    }
+    vTaskDelay(pdMS_TO_TICKS(100)); [cite: 414]
+  }
+}
+
+void TareaControlLEDs(void *pvParameters) { [cite: 418]
+  bool estadoLedSegundos = false; [cite: 420]
+  for (;;) { [cite: 421]
+    if (xSemaphoreTake(relojMutex, portMAX_DELAY) == pdTRUE) { [cite: 424]
+      estadoLedSegundos = !estadoLedSegundos; [cite: 429]
+      digitalWrite(LED_SEGUNDOS, estadoLedSegundos); [cite: 430]
+      digitalWrite(LED_MODO, modo > 0); [cite: 432]
+      xSemaphoreGive(relojMutex); [cite: 434]
+    }
+    vTaskDelay(pdMS_TO_TICKS(500)); // Ajustat a 500ms perquè el parpelleig sigui d'1 segon real (mig encès, mig apagat)
+  }
+}
